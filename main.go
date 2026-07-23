@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/token"
 	"go/types"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/pflag"
@@ -115,6 +117,39 @@ func generateErrReturn(filePath string, fileContent []byte, byteOffset int) (str
 	if targetFuncType == nil || targetFuncType.Results == nil {
 		return "", fmt.Errorf("no enclosing function with return values found at position: %v", byteOffset)
 	}
+	conf := types.Config{Importer: importer.Default()}
+	info := &types.Info{Uses: make(map[*ast.Ident]types.Object)}
+	_, _ = conf.Check("main", fset, []*ast.File{targetFile}, info)
+
+	importMap := make(map[string]string)
+	for _, imp := range targetFile.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			return "", err
+		}
+
+		var localName string
+		if imp.Name != nil {
+			localName = imp.Name.Name
+		} else {
+			if pkgName, ok := info.Implicits[imp]; ok {
+				localName = pkgName.Name()
+			} else {
+				localName = filepath.Base(path) // or use path.Base from "path"
+			}
+		}
+		importMap[path] = localName
+	}
+
+	qualifier := func(p *types.Package) string {
+		if p.Name() == "main" {
+			return ""
+		}
+		if alias, ok := importMap[p.Path()]; ok {
+			return alias
+		}
+		return p.Name() // fallback
+	}
 
 	var returns []string
 	lastIndex := len(targetFuncType.Results.List) - 1
@@ -137,7 +172,7 @@ func generateErrReturn(filePath string, fileContent []byte, byteOffset int) (str
 			continue
 		}
 
-		zeroVal := formatZeroValue(tv.Type)
+		zeroVal := formatZeroValue(tv.Type, qualifier)
 		for i := 0; i < count; i++ {
 			returns = append(returns, zeroVal)
 		}
@@ -158,8 +193,7 @@ func generateErrReturn(filePath string, fileContent []byte, byteOffset int) (str
 }
 
 // formatZeroValue evaluates the underlying type to decide how to render the zero-value expression
-func formatZeroValue(t types.Type) string {
-	named, isNamed := t.(*types.Named)
+func formatZeroValue(t types.Type, qualifier func(*types.Package) string) string {
 	underlying := t.Underlying()
 	switch u := underlying.(type) {
 	case *types.Basic:
@@ -176,17 +210,7 @@ func formatZeroValue(t types.Type) string {
 	case *types.Interface, *types.Pointer, *types.Slice, *types.Map, *types.Chan, *types.Signature:
 		return "nil"
 
-	case *types.Array:
-		if isNamed {
-			return named.Obj().Name() + "{}"
-		}
-		return fmt.Sprintf("[%d]%s{}", u.Len(), u.Elem())
-
-	case *types.Struct:
-		if isNamed {
-			return named.Obj().Name() + "{}"
-		}
-		qualifier := func(p *types.Package) string { return p.Name() }
+	case *types.Array, *types.Struct:
 		return types.TypeString(t, qualifier) + "{}"
 	}
 
