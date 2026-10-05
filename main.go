@@ -99,6 +99,7 @@ func generateErrReturn(filePath string, fileContent []byte, byteOffset int) (str
 
 	var targetFunc *ast.FuncDecl
 	var targetFuncType *ast.FuncType
+	var inLoop bool
 	ast.Inspect(targetFile, func(n ast.Node) bool {
 		if n == nil {
 			return true
@@ -111,6 +112,8 @@ func generateErrReturn(filePath string, fileContent []byte, byteOffset int) (str
 			case *ast.FuncLit:
 				targetFunc = nil
 				targetFuncType = fn.Type
+			case *ast.ForStmt, *ast.RangeStmt:
+				inLoop = true
 			}
 			return true // Keep digging deeper for nested anonymous functions
 		}
@@ -119,6 +122,10 @@ func generateErrReturn(filePath string, fileContent []byte, byteOffset int) (str
 
 	if targetFuncType == nil {
 		return "", fmt.Errorf("no enclosing function found at position: %v", byteOffset)
+	}
+
+	if inLoop {
+		return "if err != nil {\n  continue\n}", nil
 	}
 
 	if targetFunc != nil && targetFunc.Name.Name == "main" && (targetFuncType.Results == nil || len(targetFuncType.Results.List) == 0) {
