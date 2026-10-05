@@ -97,6 +97,7 @@ func generateErrReturn(filePath string, fileContent []byte, byteOffset int) (str
 	tokenFile := fset.File(targetFile.Pos())
 	targetPos := tokenFile.Pos(byteOffset)
 
+	var targetFunc *ast.FuncDecl
 	var targetFuncType *ast.FuncType
 	ast.Inspect(targetFile, func(n ast.Node) bool {
 		if n == nil {
@@ -105,8 +106,10 @@ func generateErrReturn(filePath string, fileContent []byte, byteOffset int) (str
 		if n.Pos() <= targetPos && targetPos <= n.End() {
 			switch fn := n.(type) {
 			case *ast.FuncDecl:
+				targetFunc = fn
 				targetFuncType = fn.Type
 			case *ast.FuncLit:
+				targetFunc = nil
 				targetFuncType = fn.Type
 			}
 			return true // Keep digging deeper for nested anonymous functions
@@ -114,9 +117,18 @@ func generateErrReturn(filePath string, fileContent []byte, byteOffset int) (str
 		return false
 	})
 
-	if targetFuncType == nil || targetFuncType.Results == nil {
-		return "", fmt.Errorf("no enclosing function with return values found at position: %v", byteOffset)
+	if targetFuncType == nil {
+		return "", fmt.Errorf("no enclosing function found at position: %v", byteOffset)
 	}
+
+	if targetFunc != nil && targetFunc.Name.Name == "main" && (targetFuncType.Results == nil || len(targetFuncType.Results.List) == 0) {
+		return "if err != nil {\n\tlog.Fatal(err)\n}", nil
+	}
+
+	if targetFuncType.Results == nil || len(targetFuncType.Results.List) == 0 {
+		return "", fmt.Errorf("enclosing function has no return values at position: %v", byteOffset)
+	}
+
 	conf := types.Config{Importer: importer.Default()}
 	info := &types.Info{Uses: make(map[*ast.Ident]types.Object)}
 	_, _ = conf.Check("main", fset, []*ast.File{targetFile}, info)
@@ -178,7 +190,6 @@ func generateErrReturn(filePath string, fileContent []byte, byteOffset int) (str
 		}
 	}
 
-	// 5. Build the "if err != nil" block
 	var sb strings.Builder
 	sb.WriteString("if err != nil {\n  return ")
 	for i, r := range returns {
